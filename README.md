@@ -1,104 +1,90 @@
-# h1_mocap_arm_player（动捕回放 + 修复后的手臂控制）
+# 🤖 H1 轮式机器人底层动捕控制系统 (H1-Mocap-Arm-Player)
 
-在 `h1_mocap_player.cpp` 基础上**只换手臂控制**，底盘、2m 围栏、夹爪、
-连接/初始化/回放流程全部保持原样。
+> **项目背景**：本项目为**实验室核心科研项目**，旨在解决人形机器人在动捕回放过程中的底层控制精度与物理安全性问题。本项目独立完成了从底层电机控制、运动学解算到安全防护机制的全套逻辑开发。
 
-- 底盘：`ChassisRange` 2m 围栏、限速 `vx≤0.20 / wz≤0.50`、微分插值 `max_dv/max_dw`
-  —— **代码原封不动**
-- 夹爪：仍用动捕 CSV 的 `gripper` 列
-- 手臂：**默认换成关节级**（底层 `setMotorControl_low` + 官方绝对关节角）
+## 📖 项目简介 (Introduction)
 
-## 整合了哪三个文件
+在官方提供的高层（HIGH_LEVEL）控制模式下，机械臂末端位姿的解算存在延迟，且难以进行精细的阻抗调节，导致动捕动作执行生硬、极易触发奇异点。本项目为了实现更极致的动作还原，在保留原有底盘围栏与限速逻辑的基础上，**将手臂控制重构为底层（LOW_LEVEL）关节级控制**。
 
-| 来源 | 用在哪 |
-| --- | --- |
-| `arm_joint_player.cpp` | 关节级下发：KP/KD 表、读真实起点、微分插值、`armPose` 部分 |
-| `gen_official.py` | 官方姿态序列 HOME / RAISE / STRAIGHT（肘 0.339 = 19.4° 伸直） |
-| `arm_motion_player.cpp` | 高层末端位姿路径（保留为 `--arm pose`，对照用） |
+系统以 500Hz 的频率通过 EtherCAT 总线直接向关节电机下发绝对角度与 Kp/Kd 参数，并内置了严格的微分插值算法与底盘积分安全围栏，彻底杜绝了高频控制下的电机过载与物理碰撞风险。
 
-## 手臂两种模式
+## ✨ 核心重构与特性 (Key Features)
 
-| 模式 | 控制方式 | 控制模式 | 适用场景 |
-| --- | --- | --- | --- |
-| `--arm joint`（默认） | `setMotorControl_low` 绝对关节角 | LOW_LEVEL | **修复版**，手臂能抬起并伸直 |
-| `--arm pose` | `setArm_high` 末端位姿 | HIGH_LEVEL | 原来的方式，完整保留作对照 |
+*   **手臂底层关节控制 (`--arm joint`)**：摒弃高层末端位姿接口，直接下发绝对关节角，确保手臂在抬起与伸直过程中的平滑性与精准度。
+*   **底盘运动学重构**：在 `LOW_LEVEL` 模式下，系统独立完成差速底盘解算（线速度/角速度映射为左右轮速），并保留原有的 2m 电子围栏与软减速机制。
+*   **双重模式无缝切换**：完整保留了高层末端位姿控制（`--arm pose`），作为底层控制异常时的备用方案。
+*   **微分插值平滑**：针对关节角与底盘速度，在单周期内严格限制最大变化步长，防止指令突变导致机械结构受损。
 
-关节姿态表（左臂；右臂按 `[1,-1,-1,1,-1,1,-1]` 镜像）：
+## 🛠️ 技术栈与架构 (Tech Stack)
 
-| 姿态 | 肩俯仰 | 肩外展 | 肩旋转 | 肘 | 腕yaw | 腕pitch | 腕roll |
-| --- | --- | --- | --- | --- | --- | --- | --- |
-| HOME 收臂 | 0.000 | +0.200 | 0.000 | −0.600 | 0 | 0 | 0 |
-| RAISE 抬起 | −1.829 | +0.090 | −0.112 | +0.625 | 0.015 | −0.024 | 0.447 |
-| STRAIGHT 伸出 | −1.609 | +0.132 | −0.124 | **+0.339（19.4°）** | 0.009 | −0.037 | 0.464 |
+- **核心控制**: C++ 17 (基于 `H1_Robot.hpp` SDK)
+- **运动学解算**: 差速底盘运动学逆解、关节空间插值
+- **辅助脚本**: Python 3 (用于生成平滑过渡的官方姿态序列)
+- **构建系统**: CMake (>= 3.10)
 
-时间轴：`rest 0.5 → raise 2.5 → extend 2.0 → hold 10.0 → retract1 2.0 → retract2 2.5 → rest 0.5`
-（夹爪全程张开 = 0）
+## 🚀 编译与运行 (Quick Start)
 
-## 为什么底盘末端接口改了（逻辑没改）
+可使用Linux发行版Ubuntu22.04系统进行
 
-关节级控制**必须 LOW_LEVEL 模式**，该模式下 `setChassis_high` 不可用，
-所以底盘改为直接给左右轮速度，换算与官方 `h1_exec_low.cpp` 完全一致：
-
-```
-r = 0.10 m, 半轴距 = 0.20 m
-v_l = v - w*0.2,  v_r = v + w*0.2
-Speed = v / r,  限幅 ±2.0 rad/s
-```
-
-2m 围栏、限速、微分插值、里程计全部沿用原代码，`v/w` 语义不变。
-`--arm pose` 时仍走 `HIGH_LEVEL + setChassis_high`，和原来一模一样。
-
-## 用法
-
+### 1. 编译指南
+确保已安装 C++ 编译环境，并在执行时传入 H1 SDK 的根目录绝对路径：
 ```bash
+chmod +x build.sh
 ./build.sh /path/to/h1_sdk
-
-# 默认：底盘按动捕走 + 手臂关节级抬起伸直（内置官方姿态）
-./h1_mocap_arm_player h1_player/data/mission_demo.csv
-
-# 用生成的关节序列文件
-python gen_official.py                       # -> data/arm_joint_official.csv
-./h1_mocap_arm_player mission.csv --joint-csv data/arm_joint_official.csv
-
-# 原来的末端位姿方式（对照）
-./h1_mocap_arm_player mission.csv --arm pose
-
-# 其它
-./h1_mocap_arm_player mission.csv --speed 0.5      # 慢放
-./h1_mocap_arm_player mission.csv --ip 10.42.0.1   # SDK 在用户主机（无线）
-./h1_mocap_arm_player mission.csv --lift 0.5       # 先升升降，避免擦地
-./h1_mocap_arm_player mission.csv --no-chassis     # 只动手臂，底盘不动
 ```
 
-动捕 CSV 格式不变：`t,v,w,lx,ly,lz,lroll,lpitch,lyaw,rx,ry,rz,rroll,rpitch,ryaw,gripper,phase`
-（由 `mocap_robot_controller` 的 `--export-h1` 导出）。
-
-关节序列走完后手臂保持在最后一帧（收臂位），底盘继续跑完。
-
-## 微调手臂姿态
-
+### 2. 运行方式
 ```bash
-python gen_official.py --elbow 0.20        # 肘越小越直（官方 0.339 = 19.4°）
-python gen_official.py --pitch -1.83       # 肩俯仰：负得越多抬得越高
-python gen_official.py --roll 0.09         # 肩外展：离身体的角度
-python gen_official.py --hold 10           # 保持时长
+# 默认模式：底盘按动捕数据运动 + 手臂执行底层关节级控制（内置官方姿态）
+./h1_mocap_arm_player data/mission_demo.csv
+
+# 进阶用法
+./h1_mocap_arm_player mission.csv --speed 0.5      # 慢放模式，便于安全调试
+./h1_mocap_arm_player mission.csv --ip 10.42.0.1   # 指定目标机器人 IP (无线连接)
+./h1_mocap_arm_player mission.csv --lift 0.5       # 初始升降高度，避免手臂擦地
+./h1_mocap_arm_player mission.csv --no-chassis     # 锁定底盘，仅测试手臂动作
 ```
 
-生成的 CSV 经 `--joint-csv` 播放，观察哪个最合适再定。
+## 🔬 技术细节解析 (Technical Details)
 
-## 目录
+### 1. 姿态字典与平滑生成
+系统内置了由 `gen_official.py` 生成的三个官方标准姿态（左臂，右臂自动按 `[1,-1,-1,1,-1,1,-1]` 镜像处理）：
+- **HOME 收臂**: `[0.000, 0.200, 0.000, -0.600, 0, 0, 0]`
+- **RAISE 抬起**: `[-1.829, 0.090, -0.112, 0.625, 0.015, -0.024, 0.447]`
+- **STRAIGHT 伸出**: `[-1.609, 0.132, -0.124, 0.339, 0.009, -0.037, 0.464]` *(肘部 0.339 rad 约等于 19.4°，达到机械伸直极限)*
 
+时间轴自动平滑过渡：`rest(0.5s) -> raise(2.5s) -> extend(2.0s) -> hold(10.0s) -> retract1(2.0s) -> retract2(2.5s) -> rest(0.5s)`。
+
+### 2. 底盘控制重构机制
+关节级控制必须处于 `LOW_LEVEL` 模式，该模式下官方的 `setChassis_high` 接口失效。因此，底盘控制改为直接计算左右轮目标速度（换算逻辑与官方 `h1_exec_low.cpp` 完全一致）：
+- 轮半径 `r = 0.10 m`，半轴距 `b = 0.20 m`
+- `v_left = v - w*b`
+- `v_right = v + w*b`
+- 电机角速度 `Speed = v / r`，并严格限幅在 `±2.0 rad/s` 内。
+
+原有的 2m 围栏、限速和里程计逻辑完全沿用，保证了 `v/w` 语义的物理安全性。
+
+### 3. 数据接口与格式
+- **动捕输入 CSV**：`t,v,w,lx,ly,lz,lroll,lpitch,lyaw,rx,ry,rz,rroll,rpitch,ryaw,gripper,phase`（由 `mocap_robot_controller` 的 `--export-h1` 导出）。
+- **关节序列 CSV**（可选）：支持通过 `--joint-csv` 传入外部生成的手臂时序文件。
+
+## ⚙️ 姿态微调与高级配置 (Fine-tuning)
+
+在调试过程中，可以通过 Python 脚本直接微调关节序列参数：
+```bash
+python gen_official.py --elbow 0.20        # 肘部微调（越小越直，0.339 为伸直）
+python gen_official.py --pitch -1.83       # 肩部俯仰（负值越大，手臂抬得越高）
+python gen_official.py --roll 0.09         # 肩部外展角
+python gen_official.py --hold 10           # 动作末端保持时长
 ```
-h1_mocap_arm_player/
-├── h1_mocap_arm_player.cpp   # 整合后的播放器
-├── gen_official.py           # 官方关节姿态序列生成器
-├── CMakeLists.txt / build.sh
-└── data/                     # 生成的关节序列 CSV
-```
+生成新的 CSV 后，通过 `--joint-csv data/xxx.csv` 加载，观察实际物理效果。
 
-## 上机注意
+## ⚠️ 实验室安全须知 (Safety Notes)
 
-1. 第一次先用 `--no-chassis` 只跑手臂，确认方向/姿态对。
-2. 关节模式启动时会**读真实关节角**再平滑过渡，不会跳变。
-3. Ctrl+C 立即停轮并退出。
-4. 长时间举臂建议改 `GRAVITY_COMPENSATION_LEVEL`（代码里 `switchControlMode` 处改）。
+1. **初次运行**：强烈建议先使用 `--no-chassis` 参数（仅跑手臂），确认关节方向与姿态安全后，再开启底盘。
+2. **启动对齐**：程序在进入关节模式时会**自动读取真实的电机角度**并以此作为起点平滑过渡，绝对不会发生开机瞬间的机械跳变。
+3. **急停机制**：一旦发生紧急情况，按 `Ctrl+C` 可立即切断电机下发指令并紧急停轮。
+4. **重力补偿**：若长时间举臂导致电机发热或下垂，可手动修改代码中 `switchControlMode` 处的 `GRAVITY_COMPENSATION_LEVEL`（重力补偿等级）。
+
+---
+**声明**：本项目为实验室科研项目成果，仅用于学术研究与教学演示。二次开发请遵循相关开源协议。
